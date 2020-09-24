@@ -1,3 +1,5 @@
+# 第一部分: 类型和语法
+
 ## 第1章: 类型
 
 ### 1.1: 类型
@@ -802,3 +804,538 @@ switch (a) {
 ### 5.8: 小结
 
 语句和表达式在英语中都能找到类比——语句就像英语中的句子，而表达式就像短语。表达式可以是简单独立的，否则可能会产生副作用。
+
+# 第二部分: 异步和性能
+
+## 第1章: 异步于将来
+
+事实上，程序中现在运行的部分和将来运行的部分之间的关系就是异步编程的核心。
+
+### 1.1: 分块的程序
+
+```JavaScript
+// 现在：
+function now() {
+ return 21;
+}
+function later() { .. }
+var answer = now();
+setTimeout( later, 1000 );
+// 将来：
+answer = answer * 2;
+console.log( "Meaning of life:", answer );
+```
+
+任何时候，只要把一段代码包装成一个函数，并指定它在响应某个事件（定时器、鼠标点击、Ajax 响应等）时执行，你就是在代码中创建了一个将来执行的块，也由此在这个程序中引入了异步机制。
+
+1.异步控制台
+
+在某些条件下，某些浏览器的 console.log(..) 并不会把传入的内容立即输出。出现这种情况的主要原因是，在许多程序（不只是 JavaScript）中，I/O 是非常低速的阻塞部分。所以，（从页面 /UI 的角度来说）浏览器在后台异步处理控制台 I/O 能够提高性能，这时用户甚至可能根本意识不到其发生。
+
+```JavaScript
+var a = {
+ index: 1
+};
+// 然后
+console.log( a ); // ??
+// 再然后
+a.index++;
+```
+
+### 1.2: 事件循环
+
+```JavaScript
+// eventLoop是一个用作队列的数组
+// （先进，先出）
+var eventLoop = [ ];
+var event;
+// “永远”执行
+while (true) {
+ // 一次tick
+ if (eventLoop.length > 0) {
+ // 拿到队列中的下一个事件
+ event = eventLoop.shift();
+ // 现在，执行下一个事件
+ try {
+ event();
+ }
+ catch (err) {
+ reportError(err);
+ }
+ }
+}
+```
+
+有一个用 while 循环实现的持续运行的循环，循环的每一轮称为一个 tick。对每个 tick 而言，如果在队列中有等待事件，那么就会从队列中摘下一个事件并执行。这些事件就是你的回调函数。
+
+### 1.3: 并行线程
+
+并行线程的交替执行和异步事件的交替调度，其粒度是完全不同的。
+
+```JavaScript
+function later() {
+ answer = answer * 2;
+ console.log( "Meaning of life:", answer );
+} 
+```
+
+在单线程环境中，线程队列中的这些项目是底层运算确实是无所谓的，因为线程本身不会被中断。但如果是在并行系统中，同一个程序中可能有两个不同的线程在运转，这时很可能就会得到不确定的结果。
+
+```JavaScript
+var a = 20;
+function foo() {
+ a = a + 1;
+}
+function bar() {
+ a = a * 2;
+}
+// ajax(..)是某个库中提供的某个Ajax函数
+ajax( "http://some.url.1", foo );
+ajax( "http://some.url.2", bar ); 
+// 线程1
+foo():
+ a. 把a的值加载到X
+ b. 把1保存在Y
+ c. 执行X加Y，结果保存在X
+ d. 把X的值保存在a 
+// 线程2
+bar():
+ a. 把a的值加载到X
+ b. 把2保存在Y
+ c. 执行X乘Y，结果保存在X
+ d. 把X的值保存在a 
+// 如果按照以下步骤执行，最终结果将会是什么样呢？
+  1a (把a的值加载到X ==> 20)
+  2a (把a的值加载到X ==> 20)
+  1b (把1保存在Y ==> 1)
+  2b (把2保存在Y ==> 2)
+  1c (执行X加Y，结果保存在X ==> 22)
+  1d (把X的值保存在a ==> 22)
+  2c (执行X乘Y，结果保存在X ==> 44)
+  2d (把X的值保存在a ==> 44)
+// a 的结果将是 44。但如果按照以下顺序执行呢？
+  1a (把a的值加载到X ==> 20)
+  2a (把a的值加载到X ==> 20)
+  2b (把2保存在Y ==> 2)
+  1b (把1保存在Y ==> 1)
+  2c (执行X乘Y，结果保存在X ==> 20)
+  1c (执行X加Y，结果保存在X ==> 21)
+  1d (把X的值保存在a ==> 21)
+  2d (把X的值保存在a ==> 21)
+  a 的结果将是 21。
+```
+
+JavaScript 从不跨线程共享数据，这意味着不需要考虑这一层次的不确定性。但是这并不意味着 JavaScript 总是确定性的。回忆一下前面提到的，foo() 和 bar() 的相对顺序改变可能会导致不同结果（41 或 42）。
+
+**完整运行**
+
+```JavaScript
+var a = 1;
+var b = 2;
+function foo() {
+ a++;
+ b = b * a;
+ a = b + 3;
+}
+function bar() {
+ b--;
+ a = 8 + b;
+ b = a * 2;
+}
+// ajax(..)是某个库中提供的某个Ajax函数
+ajax( "http://some.url.1", foo );
+ajax( "http://some.url.2", bar ); 
+块 1：
+  var a = 1;
+  var b = 2;
+块 2（foo()）：
+  a++;
+  b = b * a;
+  a = b + 3;
+块 3（bar()）：
+  b--;
+  a = 8 + b;
+  b = a * 2; 
+输出 1：
+  var a = 1;
+  var b = 2;
+// foo()
+  a++;
+  b = b * a;
+  a = b + 3;
+// bar()
+  b--;
+  a = 8 + b;
+  b = a * 2;
+  a; // 11
+  b; // 22
+输出 2：
+  var a = 1;
+  var b = 2;
+// bar()
+  b--;
+  a = 8 + b;
+  b = a * 2;
+// foo()
+  a++;
+  b = b * a;
+  a = b + 3;
+  a; // 183
+  b; // 180 
+```
+
+### 1.4: 并发
+
+下面列出了事件循环队列中所有这些交替的事件：
+
+```JavaScript
+onscroll, 请求1 <--- 进程1启动
+onscroll, 请求2
+响应1 <--- 进程2启动
+onscroll, 请求3
+响应2
+响应3
+onscroll, 请求4
+onscroll, 请求5
+onscroll, 请求6
+响应4
+onscroll, 请求7 <--- 进程1结束
+响应6
+响应5
+响应7 <--- 进程2结束
+```
+
+“进程”1 和“进程”2 并发运行（任务级并行），但是它们的各个事件是在事件循环队列中依次运行的。
+
+#### 1.4.1: 非交互
+
+两个或多个“进程”在同一个程序内并发地交替运行它们的步骤 / 事件时，如果这些任务彼此不相关，就不一定需要交互。如果进程间没有相互影响的话，不确定性是完全可以接受的。
+
+```JavaScript
+var res = {};
+function foo(results) {
+ res.foo = results;
+}
+function bar(results) {
+ res.bar = results;
+}
+// ajax(..)是某个库提供的某个Ajax函数
+ajax( "http://some.url.1", foo );
+ajax( "http://some.url.2", bar ); 
+```
+
+#### 1.4.2: 交互
+
+更常见的情况是，并发的“进程”需要相互交流，通过作用域或 DOM 间接交互。正如前面介绍的，如果出现这样的交互，就需要对它们的交互进行协调以避免竞态的出现。
+
+```javascript
+var res = [];
+function response(data) {
+ res.push( data );
+}
+// ajax(..)是某个库中提供的某个Ajax函数
+ajax( "http://some.url.1", response );
+ajax( "http://some.url.2", response ); 
+```
+
+这里的并发“进程”是这两个用来处理 Ajax 响应的 response() 调用。它们可能以任意顺序运行。
+
+```JavaScript
+var a;
+function foo(x) {
+ a = x * 2;
+ baz();
+}
+function bar(x) {
+ a = x / 2;
+ baz();
+}
+function baz() {
+ console.log( a );
+}
+// ajax(..)是某个库中的某个Ajax函数
+ajax( "http://some.url.1", foo );
+ajax( "http://some.url.2", bar ); 
+//不管哪一个（foo() 或 bar()）后被触发，都不仅会覆盖另外一个给 a 赋的值，也会重复调用 baz()（很可能并不是想要的结果）。
+// 改良版: 
+var a;
+function foo(x) {
+ if (!a) {
+ a = x * 2;
+ baz();
+ }
+}
+function bar(x) {
+ if (!a) {
+ a = x / 2;
+ baz();
+ }
+}
+function baz() {
+ console.log( a );
+}
+// ajax(..)是某个库中的某个Ajax函数
+ajax( "http://some.url.1", foo );
+ajax( "http://some.url.2", bar ); 
+// 条件判断 if (!a) 使得只有 foo() 和 bar() 中的第一个可以通过，第二个（实际上是任何后续的）调用会被忽略。也就是说，第二名没有任何意义！
+```
+
+#### 1.4.3: 协作
+
+还有一种并发合作方式，称为并发协作（cooperative concurrency）。这里的重点不再是通过共享作用域中的值进行交互（尽管显然这也是允许的！）。这里的目标是取到一个长期运行的“进程”，并将其分割成多个步骤或多批任务，使得其他并发“进程”有机会将自己的运算插入到事件循环队列中交替运行。
+
+```javascript
+// 使代码更简洁
+var res = [];
+// response(..)从Ajax调用中取得结果数组
+function response(data) {
+ // 添加到已有的res数组
+ res = res.concat(
+ // 创建一个新的变换数组把所有data值加倍
+ data.map( function(val){
+ return val * 2;
+ } )
+ );
+}
+// ajax(..)是某个库中提供的某个Ajax函数
+ajax( "http://some.url.1", response );
+ajax( "http://some.url.2", response ); 
+```
+
+### 1.5: 任务
+
+ ES6 中，有一个新的概念建立在事件循环队列之上，叫作任务队列（job queue）。这个概念给大家带来的最大影响可能是 Promise 的异步特性（参见第 3 章）。
+
+```JavaScript
+console.log( "A" );
+setTimeout( function(){
+ console.log( "B" );
+}, 0 );
+// 理论上的"任务API"异步调用类似promise
+schedule( function(){
+ console.log( "C" );
+ schedule( function(){
+ console.log( "D" );
+ } );
+} ); 
+// A C D B
+```
+
+### 1.6: 语句顺序
+
+尽管 JavaScript 语义让我们不会见到编译器语句重排序可能导致的噩梦，这是一种幸运，但是代码编写的方式（从上到下的模式）和编译后执行的方式之间的联系非常脆弱，理解这一点也非常重要。
+
+### 1.7: 小结
+
+通常需要对这些并发执行的“进程”（有别于操作系统中的进程概念）进行某种形式的交互协调，比如需要确保执行顺序或者需要防止竞态出现。这些“进程”也可以通过把自身分割为更小的块，以便其他“进程”插入进来。
+
+## 第2章: 回调
+
+### 2.1: continuation
+
+```javascript
+// A
+setTimeout( function(){
+ // C
+}, 1000 );
+// B 
+// A C B
+```
+
+旦我们以回调函数的形式引入了单个 continuation（或者几十个，就像很多程序所做的那样！），我们就容许了大脑工作方式和代码执行方式的分歧。一旦这两者出现分歧（这远不是这种分歧出现的唯一情况，我想你明白这一点！），我们就得面对这样一个无法逆转的事实：代码变得更加难以理解、追踪、调试和维护。
+
+### 2.2: 顺序的大脑
+
+巴拉巴拉的说大脑可以多任务执行,但是有危险
+
+#### 2.2.1: 执行与计划
+
+> 唯一比不知道代码为什么崩溃更可怕的事情是，不知道为什么一开始它是工作的！这就是经典的“纸牌屋”心理：“它可以工作，可我不知道为什么，所以谁也别碰它！”你可能听说过“他人即地狱”（萨特）这种说法，对程序员来说则是“他人的代码即地狱”。而我深信不疑的是：“不理解自己的代码才是地狱。”回调就是主要元凶之一。
+
+#### 2.2.2: 嵌套回调与链式回调
+
+```javascript
+listen( "click", function handler(evt){
+ setTimeout( function request(){
+   ajax( "http://some.url.1", function response(text){
+     if (text == "hello") {
+     	handler();
+     }
+     else if (text == "world") {
+     	request();
+     }
+   } );
+ }, 500) ;
+} ); 
+
+首先（现在）我们有：
+listen( "..", function handler(..){
+ // ..
+} );
+然后是将来，我们有：
+setTimeout( function request(..){
+ // ..
+}, 500) ;
+接着还是将来，我们有：
+ajax( "..", function response(..){
+ // ..
+} );
+最后（最晚的将来），我们有：
+if ( .. ) {
+ // ..
+}
+else .. 
+// 首先，例子中的步骤是按照 1、2、3、4……的顺序，这只是一个偶然。实际的异步JavaScript 程序中总是有很多噪声，使得代码更加杂乱。在大脑的演习中，我们需要熟练地绕过这些噪声，从一个函数跳到下一个函数。对于这样满是回调的代码，理解
+```
+
+这种代码常常被称为回调地狱（callback hell），有时也被称为毁灭金字塔（pyramid of doom，得名于嵌套缩进产生的横向三角形状）。
+
+```javascript
+listen( "click", handler );
+function handler() {
+ setTimeout( request, 500 );
+}
+function request(){
+ ajax( "http://some.url.1", response );
+}
+function response(text){
+ if (text == "hello") {
+ 	handler();
+ }
+ else if (text == "world") {
+ 	request();
+ }
+} 
+```
+
+这种组织形式的代码不像前面以嵌套 / 缩进的形式组织的代码那么容易识别了，但是它和回调地狱一样脆弱，易受影响。为什么？
+在线性（顺序）地追踪这段代码的过程中，我们不得不从一个函数跳到下一个，再跳到下一个，在整个代码中跳来跳去以“查看”流程。而且别忘了，这还是简化的形式，只考虑了最优情况。我们都知道，真实的异步 JavaScript 程序代码要混乱得多，这使得这种追踪的难度会成倍增加。
+
+### 2.3: 信任问题
+
+它以这样一个思路为中心：有时候 ajax(..)（也就是你交付回调 continuation 的第三方）不是你编写的代码，也不在你的直接控制下。多数情况下，它是某个第三方提供的工具。
+我们把这称为控制反转（inversion of control），也就是把自己程序一部分的执行控制交给某个第三方。在你的代码和第三方工具（一组你希望有人维护的东西）之间有一份并没有明确表达的契约。
+
+#### 2.3.1: 五个回调的故事
+
+• 调用回调过早（在追踪之前）；
+• 调用回调过晚（或没有调用）；
+• 调用回调的次数太少或太多（就像你遇到过的问题！）；
+• 没有把所需的环境 / 参数成功传给你的回调函数；
+• 吞掉可能出现的错误或异常；......
+
+#### 2.3.2: 不只是别人的代码
+
+请思考这一点：你能够真正信任理论上（在自己的代码库中）你可以控制的工具吗？
+
+不管你怎么做，这种类型的检查 / 规范化的过程对于函数输入是很常见的，即使是对于理论上完全可以信任的代码。大体上说，这等价于那条地缘政治原则：“信任，但要核实。”
+
+### 2.4: 省点回调
+
+回调设计存在几个变体，意在解决前面讨论的一些信任问题（不是全部！）。这种试图从回调模式内部挽救它的意图是勇敢的，但却注定要失败。
+1.举例来说，为了更优雅地处理错误，有些 API 设计提供了分离回调（一个用于成功通知，一个用于出错通知）：
+
+```javascript
+function success(data) {
+ console.log( data );
+}
+function failure(err) {
+ console.error( err );
+}
+ajax( "http://some.url.1", success, failure ); 
+```
+
+在这种设计下，API 的出错处理函数 failure() 常常是可选的，如果没有提供的话，就是
+假定这个错误可以吞掉。
+
+2.还有一种常见的回调模式叫作“error-first 风格”（有时候也称为“Node 风格”，因为几乎所有 Node.js API 都采用这种风格），其中回调的第一个参数保留用作错误对象（如果有的话）。如果成功的话，这个参数就会被清空 / 置假（后续的参数就是成功数据）。不过，如果产生了错误结果，那么第一个参数就会被置起 / 置真（通常就不会再传递其他结果）：
+
+```javascript
+ // 出错？
+ if (err) {
+ console.error( err );
+ }
+ // 否则认为成功
+ else {
+ console.log( data );
+ }
+}
+ajax( "http://some.url.1", response ); 
+```
+
+one:首先，这并没有像表面看上去那样真正解决主要的信任问题。这并没有涉及阻止或过滤不想要的重复调用回调的问题。现在事情更糟了，因为现在你可能同时得到成功或者失败的结果，或者都没有，并且你还是不得不编码处理所有这些情况。
+two: 另外，不要忽略这个事实：尽管这是一种你可以采用的标准模式，但是它肯定更加冗长和模式化，可复用性不高，所以你还得不厌其烦地给应用中的每个回调添加这样的代码。
+
+3.那么完全不调用这个信任问题又会怎样呢？如果这是个问题的话（可能应该是个问题！），你可能需要设置一个超时来取消事件。可以构造一个工具（这里展示的只是一个“验证概念”版本）来帮助实现这一点：
+
+```javascript
+function timeoutify(fn,delay) {
+ var intv = setTimeout( function(){
+   intv = null;
+   fn( new Error( "Timeout!" ) );
+   }, delay )
+   ;
+   return function() {
+      // 还没有超时？
+     if (intv) {
+       clearTimeout( intv );
+       fn.apply( this, arguments );
+     }
+   };
+} 
+// 使用"error-first 风格" 回调设计
+function foo(err,data) {
+ if (err) {
+ 	console.error( err ); 
+ }
+ else {
+ 	console.log( data );
+ }
+}
+ajax( "http://some.url.1", timeoutify( foo, 500 ) ); 
+```
+
+由同步或异步行为引起的不确定性几乎总会带来极大的 bug 追踪难度。在某些圈子里，人们用虚构的十分疯狂的恶魔 Zalgo 来描述这种同步 / 异步噩梦。常常会有“不要放出 Zalgo”这样的呼喊，而这也引出了一条非常有效的建议：永远异步调用回调，即使就在事件循环的下一轮，这样，所有回调就都是可预测的异步调用了。
+
+4.如果你不确定关注的 API 会不会永远异步执行怎么办呢？可以创建一个类似于这个“验证概念”版本的 asyncify(..) 工具：
+
+```javascript
+function asyncify(fn) {
+ var orig_fn = fn,
+   intv = setTimeout( function(){
+     intv = null;
+     if (fn) fn();
+ 	}, 0 );
+     fn = null;
+     return function() {
+       // 触发太快，在定时器intv触发指示异步转换发生之前？
+       if (intv) {
+       fn = orig_fn.bind.apply(
+       orig_fn,
+       // 把封装器的this添加到bind(..)调用的参数中，
+       // 以及克里化（currying）所有传入参数
+       [this].concat( [].slice.call( arguments ) )
+       );
+     }
+     // 已经是异步
+     else {
+       // 调用原来的函数
+       orig_fn.apply( this, arguments );
+     }
+   };
+ } 
+ function result(data) {
+ 	console.log( a );
+ }
+ var a = 0;
+ ajax( "..pre-cached-url..", asyncify( result ) );
+ a++; 
+```
+
+### 2.5: 小结
+
+第一，大脑对于事情的计划方式是线性的、阻塞的、单线程的语义，但是回调表达异步流程的方式是非线性的、非顺序的，这使得正确推导这样的代码难度很大。难于理解的代码是坏代码，会导致坏 bug。
+
+我们需要一种更同步、更顺序、更阻塞的的方式来表达异步，就像我们的大脑一样。
+
+第二，也是更重要的一点，回调会受到控制反转的影响，因为回调暗中把控制权交给第三方（通常是不受你控制的第三方工具！）来调用你代码中的 continuation。这种控制转移导致一系列麻烦的信任问题，比如回调被调用的次数是否会超出预期。
