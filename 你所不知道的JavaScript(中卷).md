@@ -1345,3 +1345,971 @@ function asyncify(fn) {
 我们需要一种更同步、更顺序、更阻塞的的方式来表达异步，就像我们的大脑一样。
 
 第二，也是更重要的一点，回调会受到控制反转的影响，因为回调暗中把控制权交给第三方（通常是不受你控制的第三方工具！）来调用你代码中的 continuation。这种控制转移导致一系列麻烦的信任问题，比如回调被调用的次数是否会超出预期。
+
+## 第3章: promise
+
+>本章经常会使用“立即”一词，通常用来描述某个 Promise 决议（resolution）动作。但是，基本上在所有情况下，这个“立即”指任务队列行为（参见第1 章）方面的意义，而不是指严格同步的现在。
+
+### 3.1: 什么是 Promise
+
+Promise 是一种封装和组合未来值的易于复用的机制.
+
+一旦 p 决议，不论是现在还是将来，下一个步骤总是相同的。
+
+### 3.2: 具有 then 方法的鸭子类型
+
+根据一个值的形态（具有哪些属性）对这个值的类型做出一些假定。这种类型检查（type check）一般用术语鸭子类型（duck typing）来表示——“如果它看起来像只鸭子，叫起来像只鸭子，那它一定就是只鸭子”（参见本书的“类型和语法”部分）。于是，对 thenable值的鸭子类型检测就大致类似于：
+
+```javascript
+if ( 
+ p !== null && 
+ ( 
+ typeof p === "object" || 
+ typeof p === "function" 
+ ) && 
+ typeof p.then === "function" 
+) { 
+ // 假定这是一个thenable! 
+} 
+else { 
+ // 不是thenable 
+}
+// 优化修改
+Object.prototype.then = function(){}; 
+Array.prototype.then = function(){}; 
+var v1 = { hello: "world" }; 
+var v2 = [ "Hello", "World" ];
+```
+
+> 我并不喜欢最后还得用 thenable 鸭子类型检测作为 Promise 的识别方案。还有其他选择，比如 branding，甚至 anti-branding。可我们所用的似乎是针对最差情况的妥协。但情况也并不完全是一片黯淡。后面我们就会看到，thenable 鸭子类型检测还是有用的。只是要清楚，如果 thenable 鸭子类型误把不是 Promise 的东西识别为了 Promise，可能就是有害的。
+
+### 3.3: Promise 信任问题
+
+先回顾一下只用回调编码的信任问题。把一个回调传入工具 foo(..) 时可能出现如下问题：
+
+• 调用回调过早；
+
+• 调用回调过晚（或不被调用）；
+
+• 调用回调次数过少或过多；
+
+• 未能传递所需的环境和参数；
+
+• 吞掉可能出现的错误和异常。
+
+#### 3.3.7: 是可信任的 Promise 吗
+
+Promise.resolve(..) 可以接受任何 thenable，将其解封为它的非 thenable 值。从 Promise.resolve(..) 得到的是一个真正的 Promise，是一个可以信任的值。如果你传入的已经是真正的 Promise，那么你得到的就是它本身，所以通过 Promise.resolve(..) 过滤来获得可信任性完全没有坏处。
+
+#### 3.3.8: 建立信任
+
+Promise 这种模式通过可信任的语义把回调作为参数传递，使得这种行为更可靠更合理。通过把回调的控制反转反转回来，我们把控制权放在了一个可信任的系统（Promise）中，这种系统的设计目的就是为了使异步编码更清晰。
+
+### 3.4: 链式流
+
+这种方式可以实现的关键在于以下两个 Promise 固有行为特性：
+
+• 每次你对 Promise 调用 then(..)，它都会创建并返回一个新的 Promise，我们可以将其链接起来；
+
+• 不管从 then(..) 调用的完成回调（第一个参数）返回的值是什么，它都会被自动设置为被链接 Promise（第一点中的）的完成。
+
+```javascript
+var p = Promise.resolve( 21 ); 
+var p2 = p.then( function(v){ 
+ console.log( v ); // 21 
+ // 用值42填充p2
+ return v * 2; 
+} ); 
+// 连接p2 
+p2.then( function(v){ 
+ console.log( v ); // 42 
+} );
+
+var p = Promise.resolve( 21 ); 
+p.then( function(v){ 
+ console.log( v ); // 21 
+ // 创建一个promise并返回
+ return new Promise( function(resolve,reject){ 
+ // 引入异步！
+ setTimeout( function(){ 
+ // 用值42填充
+ resolve( v * 2 ); 
+ }, 100 ); 
+ } ); 
+} ) 
+.then( function(v){ 
+ // 在前一步中的100ms延迟之后运行
+ console.log( v ); // 42 
+} );
+```
+
+现在我们可以构建这样一个序列：不管我们想要多少个异步步骤，每一步都能够根据需要等待下一步（或者不等！）。
+
+```javascript
+request( "http://some.url.1/" ) 
+// 步骤2：
+.then( function(response1){ 
+ foo.bar(); // undefined，出错！
+ // 永远不会到达这里
+ return request( "http://some.url.2/?v=" + response1 ); 
+} ) 
+// 步骤3：
+.then( 
+ function fulfilled(response2){ 
+ // 永远不会到达这里
+ }, 
+ // 捕捉错误的拒绝处理函数
+ function rejected(err){ 
+ console.log( err ); 
+ // 来自foo.bar()的错误TypeError 
+ return 42; 
+ } 
+) 
+// 步骤4：
+.then( function(msg){ 
+ console.log( msg ); // 42 
+} )
+```
+
+第 2 步出错后，第 3 步的拒绝处理函数会捕捉到这个错误。拒绝处理函数的返回值（这段代码中是 42），如果有的话，会用来完成交给下一个步骤（第 4 步）的 promise，这样，这个链现在就回到了完成状态。
+
+让我们来简单总结一下使链式流程控制可行的 Promise 固有特性: 
+
+• 调用 Promise 的 then(..) 会自动创建一个新的 Promise 从调用返回。
+
+• 在完成或拒绝处理函数内部，如果返回一个值或抛出一个异常，新返回的（可链接的）Promise 就相应地决议。
+
+• 如果完成或拒绝处理函数返回一个 Promise，它将会被展开，这样一来，不管它的决议值是什么，都会成为当前 then(..) 返回的链接 Promise 的决议值。
+
+### 3.5: 错误处理
+
+在回调中，一些模式化的错误处理方式已经出现，最值得一提的是 error-first 回调风格：
+
+````javascript
+function foo(cb) { 
+ setTimeout( function(){ 
+ try { 
+ var x = baz.bar(); 
+ cb( null, x ); // 成功！
+ } 
+ catch (err) { 
+ cb( err ); 
+ } 
+ }, 100 ); 
+} 
+foo( function(err,val){ 
+ if (err) { 
+ console.error( err ); // 烦 :( 
+ } 
+ else { 
+ console.log( val ); 
+ } 
+} );
+````
+
+我们回到 Promise 中的错误处理，其中拒绝处理函数被传递给 then(..)。Promise 没有采用流行的 error-fifirst 回调设计风格，而是使用了分离回调（split-callback）风格。一个回调用于完成情况，一个回调用于拒绝情况：
+
+```javascript
+var p = Promise.reject( "Oops" ); 
+p.then( 
+ function fulfilled(){ 
+ // 永远不会到达这里
+ }, 
+ function rejected(err){ 
+ console.log( err ); // "Oops" 
+ } 
+);
+```
+
+#### 3.5.1: 绝望的陷阱
+
+为了避免丢失被忽略和抛弃的 Promise 错误，一些开发者表示，Promise 链的一个最佳实践就是最后总以一个 catch(..) 结束，比如：
+
+```javascript
+var p = Promise.resolve( 42 ); 
+p.then( 
+ function fulfilled(msg){ 
+ // 数字没有string函数，所以会抛出错误
+ console.log( msg.toLowerCase() ); 
+ } 
+) 
+.catch( handleErrors );
+```
+
+#### 3.5.2: 处理未捕获的情况
+
+更常见的一种看法是：Promsie 应该添加一个 done(..) 函数，从本质上标识 Promsie 链的结束。done(..) 不会创建和返回 Promise，所以传递给 done(..) 的回调显然不会报告一个并不存在的链接 Promise 的问题。
+
+```javascript
+var p = Promise.resolve( 42 ); 
+p.then( 
+ function fulfilled(msg){ 
+ // 数字没有string函数，所以会抛出错误
+ console.log( msg.toLowerCase() ); 
+ } 
+) 
+.done( null, handleErrors ); 
+// 如果handleErrors(..)引发了自身的异常，会被全局抛出到这里
+```
+
+相比没有结束的链接或者任意时长的定时器，这种方案看起来似乎更有吸引力。但最大的问题是，它并不是 ES6 标准的一部分，所以不管听起来怎么好，要成为可靠的普遍解决方案，它还有很长一段路要走。
+
+**浏览器有一个特有的功能是我们的代码所没有的：它们可以跟踪并了解所有对象被丢弃以及被垃圾回收的时机。所以，浏览器可以追踪 Promise 对象。如果在它被垃圾回收的时候其中有拒绝，浏览器就能够确保这是一个真正的未捕获错误，进而可以确定应该将其报告到开发者终端。**
+
+#### 3.5.3: 成功的坑
+
+• 默认情况下，Promsie 在下一个任务或时间循环 tick 上（向开发者终端）报告所有拒绝，如果在这个时间点上该 Promise 上还没有注册错误处理函数。
+
+• 如果想要一个被拒绝的 Promise 在查看之前的某个时间段内保持被拒绝状态，可以调用defer()，这个函数优先级高于该 Promise 的自动错误报告。
+
+```javascript
+var p = Promise.reject( "Oops" ).defer(); 
+// foo(..)是支持Promise的
+foo( 42 ) 
+.then( 
+ function fulfilled(){ 
+ return p; 
+ }, 
+ function rejected(err){ 
+ // 处理foo(..)错误
+ } 
+); 
+...
+```
+
+创建 p 的时候，我们知道需要等待一段时间才能使用或查看它的拒绝结果，所以我们就调用 defer()，这样就不会有全局报告出现。为了便于链接，defer() 只是返回这同一个promise。 
+
+### 3.6: promise模式
+
+#### 3.6.1: Promise.all([ .. ])
+
+假定你想要同时发送两个 Ajax 请求，等它们不管以什么顺序全部完成之后，再发送第三个 Ajax 请求。考虑：
+
+```javascript
+// request(..)是一个Promise-aware Ajax工具
+// 就像我们在本章前面定义的一样
+var p1 = request( "http://some.url.1/" ); 
+var p2 = request( "http://some.url.2/" ); 
+Promise.all( [p1,p2] ) 
+.then( function(msgs){ 
+ // 这里，p1和p2完成并把它们的消息传入
+ return request( 
+ "http://some.url.3/?v=" + msgs.join(",") 
+ ); 
+} ) 
+.then( function(msg){ 
+ console.log( msg ); 
+} );
+```
+
+Promise.all([ .. ]) 需要一个参数，是一个数组，通常由 Promise 实例组成。从 Promise.all([ .. ]) 调用返回的 promise 会收到一个完成消息（代码片段中的 msg）。这是一个由所有传入 promise 的完成消息组成的数组，与指定的顺序一致（与完成顺序无关）。
+
+#### 3.6.2: Promise.race([ .. ])
+
+尽管 Promise.all([ .. ]) 协调多个并发 Promise 的运行，并假定所有 Promise 都需要完成，但有时候你会想只响应“第一个跨过终点线的 Promise”，而抛弃其他 Promise。
+
+这种模式传统上称为门闩，但在 Promise 中称为竞态。
+
+```javascript
+// request(..)是一个支持Promise的Ajax工具
+// 就像我们在本章前面定义的一样
+var p1 = request( "http://some.url.1/" ); 
+var p2 = request( "http://some.url.2/" ); 
+Promise.race( [p1,p2] ) 
+.then( function(msg){ 
+ // p1或者p2将赢得这场竞赛
+ return request( 
+ "http://some.url.3/?v=" + msg 
+ ); 
+} ) 
+.then( function(msg){ 
+ console.log( msg ); 
+} );
+```
+
+1. 超时竞赛
+
+   ```javascript
+   // 前面定义的timeoutPromise(..)返回一个promise，
+   // 这个promise会在指定延时之后拒绝
+   // 为foo()设定超时
+   Promise.race( [ 
+    foo(), // 启动foo() 
+    timeoutPromise( 3000 ) // 给它3秒钟
+   ] ) 
+   .then( 
+    function(){ 
+    // foo(..)按时完成！
+    }, 
+    function(err){ 
+    // 要么foo()被拒绝，要么只是没能够按时完成，
+    // 因此要查看err了解具体原因
+    } 
+   );
+   ```
+
+   在多数情况下，这个超时模式能够很好地工作。但是，还有一些微妙的情况需要考虑，并且坦白地说，对于 Promise.race([ .. ]) 和 Promise.all([ .. ]) 也都是如此。
+
+2. finally
+
+   角度提出这个问题的——通常最终它们会被垃圾回收——而是从行为的角度（副作用等）。Promise 不能被取消，也不应该被取消，因为那会摧毁 3.8.5 节讨论的外部不变性原则，所以它们只能被默默忽略。
+
+```javascript
+var p = Promise.resolve( 42 ); 
+p.then( something ) 
+.finally( cleanup ) 
+.then( another ) 
+.finally( cleanup );
+```
+
+####3.6.3: all([ .. ]) 和 race([ .. ]) 的变体
+
+• none([ .. ])这个模式类似于 all([ .. ])，不过完成和拒绝的情况互换了。所有的 Promise 都要被拒绝，即拒绝转化为完成值，反之亦然。
+
+• any([ .. ])这个模式与 all([ .. ]) 类似，但是会忽略拒绝，所以只需要完成一个而不是全部。
+
+• first([ .. ]) 这个模式类似于与 any([ .. ]) 的竞争，即只要第一个 Promise 完成，它就会忽略后续的任何拒绝和完成。
+
+• last([ .. ])这个模式类似于 first([ .. ])，但却是只有最后一个完成胜出。
+
+#### 3.6.4: 并发迭代
+
+举例来说，让我们考虑一下一个异步的 map(..) 工具。它接收一个数组的值（可以是Promise 或其他任何值），外加要在每个值上运行一个函数（任务）作为参数。map(..) 本身返回一个 promise，其完成值是一个数组，该数组（保持映射顺序）保存任务执行之后的异步完成值：
+
+```javascript
+if (!Promise.map) { 
+ Promise.map = function(vals,cb) { 
+ // 一个等待所有map的promise的新promise 
+ return Promise.all( 
+ // 注：一般数组map(..)把值数组转换为 promise数组
+ vals.map( function(val){ 
+ // 用val异步map之后决议的新promise替换val 
+ return new Promise( function(resolve){ 
+ cb( val, resolve ); 
+ } ); 
+ } ) 
+ ); 
+ }; 
+}
+```
+
+### 3.7: Promise API 概述
+
+#### 3.7.1: new Promise(..) 构造器
+
+有启示性的构造器 Promise(..) 必须和 new 一起使用，并且必须提供一个函数回调。这个回调是同步的或立即调用的。这个函数接受两个函数回调，用以支持 promise 的决议。通常我们把这两个函数称为 resolve(..) 和 reject(..)：
+
+####3.7.2: Promise.resolve(..) 和 Promise.reject(..)
+
+```javascript
+var fulfilledTh = { 
+ then: function(cb) { cb( 42 ); } 
+}; 
+var rejectedTh = { 
+ then: function(cb,errCb) { 
+ errCb( "Oops" ); 
+ } 
+}; 
+var p1 = Promise.resolve( fulfilledTh ); 
+var p2 = Promise.resolve( rejectedTh ); 
+// p1是完成的promise
+// p2是拒绝的promise
+```
+
+.......
+
+### 3.8: Promise 局限性
+
+#### 3.8.1: 顺序错误处理
+
+Promise 的设计局限性（具体来说，就是它们链接的方式）造成了一个让人很容易中招的陷阱，即 Promise 链中的错误很容易被无意中默默忽略掉.
+
+关于 Promise 错误，还有其他需要考虑的地方。由于一个 Promise 链仅仅是连接到一起的成员 Promise，没有把整个链标识为一个个体的实体，这意味着没有外部方法可以用于观察可能发生的错误。
+
+####3.8.2: 单一值
+
+根据定义，Promise 只能有一个完成值或一个拒绝理由。在简单的例子中，这不是什么问题，但是在更复杂的场景中，你可能就会发现这是一种局限了。
+
+#### 3.8.3: 单决议
+
+Promise 最本质的一个特征是：Promise 只能被决议一次（完成或拒绝）。在许多异步情况中，你只会获取一个值一次，所以这可以工作良好。
+
+####3.8.4: 惯性
+
+要在你自己的代码中开始使用 Promise 的话，一个具体的障碍是，现存的所有代码都还不理解 Promise。如果你已经有大量的基于回调的代码，那么保持编码风格不变要简单得多。
+
+#### 3.8.5: 无法取消的 Promise
+
+一旦创建了一个 Promise 并为其注册了完成和 / 或拒绝处理函数，如果出现某种情况使得这个任务悬而未决的话，你也没有办法从外部停止它的进程。
+
+#### 3.8.6: Promise 性能
+
+这个特定的局限性既简单又复杂。
+
+把基本的基于回调的异步任务链与 Promise 链中需要移动的部分数量进行比较。很显然，Promise 进行的动作要多一些，这自然意味着它也会稍慢一些。请回想 Promise 提供的信任保障列表，再与你要在回调之上建立同样的保护自建的解决方案来比较一下。
+
+### 3.9: 小结
+
+Promise 非常好，请使用。它们解决了我们因只用回调的代码而备受困扰的控制反转问题。
+
+它们并没有摈弃回调，只是把回调的安排转交给了一个位于我们和其他工具之间的可信任的中介机制。
+
+Promise 链也开始提供（尽管并不完美）以顺序的方式表达异步流的一个更好的方法，这有助于我们的大脑更好地计划和维护异步 JavaScript 代码。我们将在第 4 章看到针对这个问题的一种更好的解决方案
+
+## 第4章: 生成器
+
+在第 2 章里，我们确定了用回调表达异步控制流程的两个关键缺陷：
+
+• 基于回调的异步不符合大脑对任务步骤的规划方式；
+
+• 由于控制反转，回调并不是可信任或可组合的。
+
+### 4.1: 打破完整运行
+
+下面是实现这样的合作式并发的 ES6 代码：
+
+```javascript
+var x = 1; 
+function *foo() { 
+ x++; 
+ yield; // 暂停！
+ console.log( "x:", x ); 
+} 
+function bar() { 
+ x++; 
+}
+// 构造一个迭代器it来控制这个生成器
+var it = foo(); 
+// 这里启动foo()！
+it.next(); 
+x; // 2 
+bar(); 
+x; // 3 
+it.next(); // x: 3
+```
+
+因此，生成器就是一类特殊的函数，可以一次或多次启动和停止，并不一定非得要完成。尽管现在还不是特别清楚它的强大之处，但随着对本章后续内容的深入学习，我们会看到它将成为用于构建以生成器作为异步流程控制的代码模式的基础构件之一。
+
+#### 4.1.1: 输入和输出
+
+生成器函数是一个特殊的函数，具有前面我们展示的新的执行模式。但是，它仍然是一个函数，这意味着它仍然有一些基本的特性没有改变。比如，它仍然可以接受参数（即输入），也能够返回值（即输出）
+
+```javascript
+function *foo(x,y) { 
+	return x * y; 
+} 
+var it = foo( 6, 7 ); 
+var res = it.next(); 
+res.value; // 42
+```
+
+1. 迭代消息传递
+
+   除了能够接受参数并提供返回值之外，生成器甚至提供了更强大更引人注目的内建消息输入输出能力，通过 yield 和 next(..) 实现。
+
+   ```javascript
+   function *foo(x) { 
+    var y = x * (yield); 
+    return y; 
+   } 
+   var it = foo( 6 ); 
+   // 启动foo(..) 
+   it.next(); 
+   var res = it.next( 7 ); 
+   res.value; // 42
+   ```
+
+   注意，这里有一点非常重要，但即使对于有经验的 JavaScript 开发者也很有迷惑性：根据你的视角不同，yield 和 next(..) 调用有一个不匹配。一般来说，需要的 next(..) 调用要比 yield 语句多一个，前面的代码片段有一个 yield 和两个 next(..) 调用。
+
+2.  两个问题的故事
+
+   消息是双向传递的——yield.. 作为一个表达式可以发出消息响应 next(..) 调用，next(..) 也可以向暂停的 yield 表达式发送值。考虑下面这段稍稍调整过的代码：
+
+   ```javascript
+   function *foo(x) { 
+    var y = x * (yield "Hello"); // <-- yield一个值！
+    return y; 
+   } 
+   var it = foo( 6 ); 
+   var res = it.next(); // 第一个next()，并不传入任何东西
+   res.value; // "Hello" 
+   res = it.next( 7 ); // 向等待的yield传入7
+   res.value; // 42 
+   // yield .. 和 next(..) 这一对组合起来，在生成器的执行过程中构成了一个双向消息传递系统。那么只看下面这一段迭代器代码：
+   var res = it.next(); // 第一个next()，并不传入任何东西
+   res.value; // "Hello" 
+   res = it.next( 7 ); // 向等待的yield传入7 
+   res.value; // 42
+   ```
+
+#### 4.1.2: 多个迭代器
+
+从语法使用的方面来看，通过一个迭代器控制生成器的时候，似乎是在控制声明的生成器函数本身。但有一个细微之处很容易忽略：每次构建一个迭代器，实际上就隐式构建了生成器的一个实例，通过这个迭代器来控制的是这个生成器实例。
+
+同一个生成器的多个实例可以同时运行，它们甚至可以彼此交互：
+
+```javascript
+function *foo() { 
+ var x = yield 2; 
+ z++; 
+ var y = yield (x * z); 
+ console.log( x, y, z ); 
+} 
+var z = 1; 
+var it1 = foo(); 
+var it2 = foo(); 
+var val1 = it1.next().value; // 2 <-- yield 2 
+var val2 = it2.next().value; // 2 <-- yield 2 
+val1 = it1.next( val2 * 10 ).value; // 40 <-- x:20, z:2 
+val2 = it2.next( val1 * 5 ).value; // 600 <-- x:200, z:3 
+it1.next( val2 / 2 ); // y:300 
+ // 20 300 3 
+it2.next( val1 / 4 ); // y:10 
+ // 200 10 3
+```
+
+### 4.2: 生成器产生值
+
+#### 4.2.1: 生产者与迭代器
+
+可以实现一个直接使用函数闭包的版本（参见本系列的《你不知道的 JavaScript（上卷）》的“作用域和闭包”部分），类似如下：
+
+```javascript
+var gimmeSomething = (function(){ 
+   var nextVal; 
+   return function(){ 
+   if (nextVal === undefined) { 
+   nextVal = 1; 
+   } 
+   else { 
+   nextVal = (3 * nextVal) +6; 
+   } 
+   return nextVal; 
+ }; 
+})(); 
+gimmeSomething(); // 1 
+gimmeSomething(); // 9 
+gimmeSomething(); // 33 
+gimmeSomething(); // 105
+```
+
+实际上，这个任务是一个非常通用的设计模式，通常通过迭代器来解决。迭代器是一个定义良好的接口，用于从一个生产者一步步得到一系列值。JavaScript 迭代器的接口，与多数语言类似，就是每次想要从生产者得到下一个值的时候调用 next()。
+
+可以为我们的数字序列生成器实现标准的迭代器接口：
+
+```javascript
+var something = (function(){ 
+ var nextVal; 
+ return { 
+ // for..of循环需要
+ [Symbol.iterator]: function(){ return this; }, 
+ // 标准迭代器接口方法
+ next: function(){ 
+ if (nextVal === undefined) { 
+ nextVal = 1; 
+ } 
+ else { 
+ nextVal = (3 * nextVal) + 6; 
+ } 
+ return { done:false, value:nextVal }; 
+ } 
+ }; 
+})(); 
+something.next().value; // 1 
+something.next().value; // 9 
+something.next().value; // 33 
+something.next().value; // 105
+```
+
+ES6 还新增了一个 for..of 循环，这意味着可以通过原生循环语法自动迭代标准迭代器：
+
+```javascript
+for (var v of something) { 
+ console.log( v ); 
+ // 不要死循环！
+ if (v > 500) { 
+ break; 
+ } 
+} 
+// 1 9 33 105 321 969 
+```
+
+#### 4.2.2: iterable
+
+前面例子中的 something 对象叫作迭代器，因为它的接口中有一个 next() 方法。而与其紧密相关的一个术语是 iterable（可迭代），即指一个包含可以在其值上迭代的迭代器的对象。
+
+for..of 循环期望 something 是 iterable，于是它寻找并调用它的 Symbol.iterator 函数。我们将这个函数定义为就是简单的 return this，也就是把自身返回，而 for..of 循环并不知情
+
+#### 4.2.3: 生成器迭代器
+
+可以把生成器看作一个值的生产者，我们通过迭代器接口的 next() 调用一次提取出一个值。
+
+可以通过生成器实现前面的这个 something 无限数字序列生产者，类似这样：
+
+```javascript
+function *something() { 
+ var nextVal; 
+ while (true) { 
+ if (nextVal === undefined) { 
+ nextVal = 1; 
+ } 
+ else { 
+ nextVal = (3 * nextVal) + 6; 
+ } 
+ yield nextVal; 
+ } 
+}
+```
+
+现在，可以通过 for..of 循环使用我们雕琢过的新的 *something() 生成器。你可以看到，其工作方式基本是相同的：
+
+```javascript
+for (var v of something()) { 
+ console.log( v ); 
+ // 不要死循环！
+ if (v > 500) { 
+ break; 
+ } 
+} 
+// 1 9 33 105 321 969
+```
+
+如果认真思考的话，你也许会从这段生成器与循环的交互中提出两个问题。
+
+• 为什么不能用 for (var v of something) .. ？因为这里的 something 是生成器，并不是iterable。我们需要调用 something() 来构造一个生产者供 for..of 循环迭代。
+
+• something() 调用产生一个迭代器，但 for..of 循环需要的是一个 iterable，对吧？是的。生成器的迭代器也有一个 Symbol.iterator 函数，基本上这个函数做的就是 return this，和我们前面定义的 iterable something 一样。换句话说，生成器的迭代器也是一个iterable ！
+
+1.停止生成器
+
+```javascript
+ try { 
+   var nextVal; 
+   while (true) { 
+     if (nextVal === undefined) { 
+     nextVal = 1; 
+   } 
+   else { 
+      nextVal = (3 * nextVal) + 6; 
+   } 
+     yield nextVal; 
+   } 
+ } 
+ // 清理子句
+ finally { 
+ 	console.log( "cleaning up!" ); 
+ }
+```
+
+之前的例子中，for..of 循环内的 break 会触发 finally 语句。但是，也可以在外部通过return(..) 手工终止生成器的迭代器实例：
+
+```javascript
+var it = something(); 
+for (var v of it) { 
+ console.log( v ); 
+ // 不要死循环！
+ if (v > 500) { 
+   console.log( 
+   // 完成生成器的迭代器
+   it.return( "Hello World" ).value 
+ ); 
+ // 这里不需要break 
+ } 
+} 
+// 1 9 33 105 321 969 
+// 清理！
+// Hello World
+```
+
+### 4.3: 异步迭代生成器
+
+生成器与异步编码模式及解决回调问题等，有什么关系呢?
+
+```javascript
+function foo(x,y,cb) { 
+ ajax( 
+ "http://some.url.1/?x=" + x + "&y=" + y, 
+ cb 
+ ); 
+} 
+foo( 11, 31, function(err,text) { 
+ if (err) { 
+ console.error( err ); 
+ } 
+ else { 
+ console.log( text ); 
+ } 
+} );
+// 如果想要通过生成器来表达同样的任务流程控制，可以这样实现：
+function foo(x,y) { 
+ ajax( 
+ "http://some.url.1/?x=" + x + "&y=" + y, 
+ function(err,data){ 
+ if (err) { 
+ // 向*main()抛出一个错误
+ it.throw( err ); 
+ } 
+ else { 
+ // 用收到的data恢复*main() 
+ it.next( data ); 
+ } 
+ } 
+ ); 
+} 
+function *main() { 
+ try { 
+ var text = yield foo( 11, 31 ); 
+ console.log( text ); 
+ } 
+ catch (err) { 
+ console.error( err ); 
+ } 
+} 
+var it = main(); 
+// 这里启动！
+it.next();
+```
+
+**同步错误处理**
+
+```javascript
+function *main() { 
+ var x = yield "Hello World"; 
+ yield x.toLowerCase(); // 引发一个异常！
+} 
+var it = main(); 
+it.next().value; // Hello World 
+try { 
+ it.next( 42 ); 
+} 
+catch (err) { 
+ console.error( err ); // TypeError 
+}
+```
+
+甚至可以捕获通过 throw(..) 抛入生成器的同一个错误，基本上也就是给生成器一个处理它的机会；如果没有处理的话，迭代器代码就必须处理：
+
+```javascript
+function *main() { 
+ var x = yield "Hello World"; 
+ // 永远不会到达这里
+ console.log( x ); 
+} 
+var it = main(); 
+it.next(); 
+try { 
+ // *main()会处理这个错误吗？看看吧！
+ it.throw( "Oops" ); 
+} 
+catch (err) { 
+ // 不行，没有处理！
+ console.error( err ); // Oops 
+}
+```
+
+### 4.4: 生成器 +Promise
+
+首先，把支持 Promise 的 foo(..) 和生成器 *main() 放在一起：
+
+```javascript
+function foo(x,y) { 
+ return request( 
+ "http://some.url.1/?x=" + x + "&y=" + y 
+ ); 
+} 
+function *main() { 
+ try { 
+ var text = yield foo( 11, 31 ); 
+ console.log( text ); 
+ } 
+ catch (err) { 
+ console.error( err ); 
+ } 
+}
+var it = main(); 
+var p = it.next().value; 
+// 等待promise p决议
+p.then( 
+ function(text){ 
+ it.next( text ); 
+ }, 
+ function(err){ 
+ it.throw( err ); 
+ } 
+);
+```
+
+#### 4.4.1: 支持 Promise 的 Generator Runner
+
+为了学习和展示的目的，我们还是自己定义一个独立工具，叫作 run(..)：
+
+```javascript
+// 在此感谢Benjamin Gruenbaum （@benjamingr on GitHub）的巨大改进！
+function run(gen) { 
+ var args = [].slice.call( arguments, 1), it; 
+ // 在当前上下文中初始化生成器
+ it = gen.apply( this, args ); 
+ // 返回一个promise用于生成器完成
+ return Promise.resolve() 
+ .then( function handleNext(value){ 
+ // 对下一个yield出的值运行
+ var next = it.next( value ); 
+ return (function handleResult(next){ 
+ // 生成器运行完毕了吗？
+ if (next.done) { 
+ return next.value; 
+ } 
+ // 否则继续运行
+ else { 
+ return Promise.resolve( next.value ) 
+ .then( 
+ // 成功就恢复异步循环，把决议的值发回生成器
+ handleNext, 
+ // 如果value是被拒绝的 promise，
+ // 就把错误传回生成器进行出错处理
+ function handleErr(err) { 
+ return Promise.resolve( 
+ it.throw( err ) 
+ ) 
+ .then( handleResult ); 
+ } 
+ ); 
+ } 
+ })(next); 
+ } ); 
+}
+```
+
+ES7：async 与 await?
+
+```javascript
+function foo(x,y) { 
+ return request( 
+ "http://some.url.1/?x=" + x + "&y=" + y 
+ ); 
+} 
+async function main() { 
+ try { 
+ var text = await foo( 11, 31 ); 
+ console.log( text ); 
+ }
+ catch (err) { 
+ console.error( err ); 
+ } 
+} 
+main();
+```
+
+#### 4.4.2: 生成器中的 Promise 并发
+
+最自然有效的答案就是让异步流程基于 Promise，特别是基于它们以时间无关的方式管理状态的能力（参见 3.1.1 节）
+
+```javascript
+function *foo() { 
+ // 让两个请求"并行"
+ var p1 = request( "http://some.url.1" ); 
+ var p2 = request( "http://some.url.2" ); 
+ // 等待两个promise都决议
+ var r1 = yield p1; 
+ var r2 = yield p2; 
+ var r3 = yield request( 
+ "http://some.url.3/?v=" + r1 + "," + r2 
+ ); 
+ console.log( r3 ); 
+} 
+// 使用前面定义的工具run(..)
+run( foo );
+```
+
+这种流程控制模型如果听起来有点熟悉的话，是因为这基本上和我们在第 3 章中通过Promise.all([ .. ]) 工具实现的 gate 模式相同。因此，也可以这样表达这种流程控制：
+
+```javascript
+ // 让两个请求"并行"，并等待两个promise都决议
+ var results = yield Promise.all( [ 
+ request( "http://some.url.1" ), 
+ request( "http://some.url.2" ) 
+ ] ); 
+ var r1 = results[0]; 
+ var r2 = results[1]; 
+ var r3 = yield request( 
+ "http://some.url.3/?v=" + r1 + "," + r2 
+ ); 
+ console.log( r3 ); 
+} 
+// 使用前面定义的工具run(..) 
+run( foo );
+```
+
+**隐藏的 Promise**
+
+要注意你的生成器内部包含了多少 Promise 逻辑。我们介绍的使用生成器实现异步的方法的全部要点在于创建简单、顺序、看似同步的代码，将异步的细节尽可能隐藏起来。
+
+```javascript
+// 注：普通函数，不是生成器
+function bar(url1,url2) { 
+ return Promise.all( [ 
+ request( url1 ), 
+ request( url2 ) 
+ ] ); 
+} 
+function *foo() { 
+ // 隐藏bar(..)内部基于Promise的并发细节
+ var results = yield bar( 
+ "http://some.url.1", 
+ "http://some.url.2" 
+ ); 
+ var r1 = results[0]; 
+ var r2 = results[1]; 
+ var r3 = yield request( 
+ "http://some.url.3/?v=" + r1 + "," + r2 
+ ); 
+ console.log( r3 ); 
+} 
+// 使用前面定义的工具run(..)
+run( foo );
+```
+
+### 4.5: 生成器委托
+
+可能出现的情况是，你可能会从一个生成器调用另一个生成器，使用辅助函数 run(..)，就像这样
+
+```javascript
+function *foo() { 
+ var r2 = yield request( "http://some.url.2" ); 
+ var r3 = yield request( "http://some.url.3/?v=" + r2 ); 
+ return r3; 
+} 
+function *bar() { 
+ var r1 = yield request( "http://some.url.1" ); 
+ // 通过 run(..) "委托"给*foo()
+ var r3 = yield run( foo ); 
+ console.log( r3 ); 
+} 
+run( bar );
+```
+
+但其实还有一个更好的方法可以实现从 *bar() 调用 *foo()，称为 yield 委托。yield 委托的具体语法是：yield * __（注意多出来的 *）。在我们弄清它在前面的例子中的使用之前，先来看一个简单点的场景：
+
+```javascript
+function *foo() { 
+ console.log( "*foo() starting" ); 
+ yield 3; 
+ yield 4; 
+ console.log( "*foo() finished" ); 
+} 
+function *bar() { 
+ yield 1; 
+ yield 2; 
+ yield *foo(); // yield委托！
+ yield 5; 
+} 
+var it = bar(); 
+it.next().value; // 1 
+it.next().value; // 2 
+it.next().value; // *foo()启动
+ // 3 
+it.next().value; // 4 
+it.next().value; // *foo()完成
+ // 5
+```
+
