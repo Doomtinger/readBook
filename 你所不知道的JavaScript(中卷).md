@@ -2313,3 +2313,670 @@ it.next().value; // *foo()完成
  // 5
 ```
 
+#### 4.5.1: 为什么用委托
+
+yield 委托的主要目的是代码组织，以达到与普通函数调用的对称。
+
+#### 4.5.2: 消息委托
+
+```JavaScript
+function *foo() {
+ console.log( "inside *foo():", yield "B" );
+ console.log( "inside *foo():", yield "C" );
+ return "D";
+}
+function *bar() {
+ console.log( "inside *bar():", yield "A" );
+ // yield委托！
+ console.log( "inside *bar():", yield *foo() );
+ console.log( "inside *bar():", yield "E" );
+ return "F";
+}
+var it = bar();
+console.log( "outside:", it.next().value );
+// outside: A
+console.log( "outside:", it.next( 1 ).value );
+// inside *bar(): 1
+// outside: B
+console.log( "outside:", it.next( 2 ).value );
+// inside *foo(): 2
+// outside: C
+console.log( "outside:", it.next( 3 ).value );
+// inside *foo(): 3
+// inside *bar(): D
+// outside: E
+console.log( "outside:", it.next( 4 ).value );
+// inside *bar(): 4
+// outside: F 
+```
+
+(1) 值 3（通过 *bar() 内部的 yield 委托）传入等待的 *foo() 内部的 yield "C" 表达式。
+(2) 然后 *foo() 调用 return "D"，但是这个值并没有一直返回到外部的 it.next(3) 调用。
+(3) 取而代之的是，值 "D" 作为 *bar() 内部等待的 yield*foo() 表达式的结果发出——这个yield 委托本质上在所有的 *foo() 完成之前是暂停的。所以 "D" 成为 *bar() 内部的最后结果，并被打印出来。
+(4) yield "E" 在 *bar() 内部调用，值 "E" 作为 it.next(3) 调用的结果被 yield 发出。
+
+从外层的迭代器（it）角度来说，是控制最开始的生成器还是控制委托的那个，没有任何区别。
+
+**异常也被委托！**
+
+ 和yield 委托透明地双向传递消息的方式一样，错误和异常也是双向传递的：
+
+```JavaScript
+function *foo() {
+ try {
+ yield "B";
+ }
+ catch (err) {
+ console.log( "error caught inside *foo():", err );
+ }
+ yield "C";
+ throw "D";
+} 
+生成器 ｜ 267
+function *bar() {
+ yield "A";
+ try {
+ yield *foo();
+ }
+ catch (err) {
+ console.log( "error caught inside *bar():", err );
+ }
+ yield "E";
+ yield *baz();
+ // 注：不会到达这里！
+ yield "G";
+}
+function *baz() {
+ throw "F";
+}
+var it = bar();
+console.log( "outside:", it.next().value );
+// outside: A
+console.log( "outside:", it.next( 1 ).value );
+// outside: B
+console.log( "outside:", it.throw( 2 ).value );
+// error caught inside *foo(): 2
+// outside: C
+console.log( "outside:", it.next( 3 ).value );
+// error caught inside *bar(): D
+// outside: E
+try {
+ console.log( "outside:", it.next( 4 ).value );
+}
+catch (err) {
+ console.log( "error caught outside:", err );
+}
+// error caught outside: F 
+```
+
+这段代码中需要注意以下几点。
+(1) 调用 it.throw(2) 时，它会发送错误消息 2 到 *bar()，它又将其委托给 *foo()，后者捕获并处理它。然后，yield "C" 把 "C" 发送回去作为 it.throw(2) 调用返回的 value。
+(2) 接下来从 *foo() 内 throw 出来的值 "D" 传播到 *bar()，这个函数捕获并处理它。然后yield "E" 把 "E" 发送回去作为 it.next(3) 调用返回的 value。
+(3) 然后，从 *baz() throw 出来的异常并没有在 *bar() 内被捕获——所以 *baz() 和 *bar()都被设置为完成状态。这段代码之后，就再也无法通过任何后续的 next(..) 调用得到值 "G"，next(..) 调用只会给 value 返回 undefined。
+
+#### 4.5.3: 异步委托
+
+```javascript
+function *foo() {
+ var r2 = yield request( "http://some.url.2" );
+ var r3 = yield request( "http://some.url.3/?v=" + r2 );
+ return r3;
+}
+function *bar() {
+ var r1 = yield request( "http://some.url.1" );
+ var r3 = yield *foo();
+ console.log( r3 );
+}
+run( bar ); 
+```
+
+这里我们在 *bar() 内部没有调用 yield run(foo)，而是调用 yield *foo()。
+在这个例子之前的版本中，使用了 Promise 机制（通过 run(..) 控制）把值从 *foo() 内的return r3 传递给 *bar() 中的局部变量 r3。现在，这个值通过 yield * 机制直接返回。除此之外的行为非常相似。
+
+#### 4.5.4: 递归委托
+
+当然，yield 委托可以跟踪任意多委托步骤，只要你把它们连在一起。甚至可以使用 yield委托实现异步的生成器递归，即一个 yield 委托到它自身的生成器：
+
+```JavaScript
+function *foo(val) {
+ if (val > 1) {
+ // 生成器递归
+ val = yield *foo( val - 1 );
+ }
+ return yield request( "http://some.url/?v=" + val );
+}
+function *bar() {
+ var r1 = yield *foo( 3 );
+ console.log( r1 ); 
+生成器 ｜ 269
+}
+run( bar ); // 前面写的加载器
+```
+
+### 4.6: 生成器并发
+
+回想一下第 1 章给出的一个场景：其中两个不同并发 Ajax 响应处理函数需要彼此协调，以确保数据交流不会出现竞态条件。我们把响应插入到 res 数组中，就像这样：
+
+```JavaScript
+function response(data) {
+ if (data.url == "http://some.url.1") {
+ res[0] = data;
+ }
+ else if (data.url == "http://some.url.2") {
+ res[1] = data;
+ }
+} 
+```
+
+但是这种场景下如何使用多个并发生成器呢？
+
+```JavaScript
+// request(..)是一个支持Promise的Ajax工具
+var res = [];
+function *reqData(url) {
+ res.push(
+ yield request( url )
+ );
+} 
+// 但是这种场景下如何使用多个并发生成器呢？
+// request(..)是一个支持Promise的Ajax工具
+var res = [];
+function *reqData(url) {
+ res.push(
+ 	yield request( url )
+ );
+} 
+```
+
+但是，实践中我们如何安排这些交互呢？首先，使用 Promise 手工实现：
+
+```JavaScript
+var it1 = reqData( "http://some.url.1" );
+var it2 = reqData( "http://some.url.2" );
+var p1 = it1.next();
+var p2 = it2.next();
+p1
+.then( function(data){
+ it1.next( data );
+ return p2; 
+} )
+.then( function(data){
+ it2.next( data );
+} ); 
+```
+
+*reqData(..) 的两个实例都被启动来发送它们的 Ajax 请求，然后通过 yield 暂停。然后我们选择在 p1 决议时恢复第一个实例，然后 p2 的决议会重启第二个实例。通过这种方式，我们使用 Promise 配置确保 res[0] 中会放置第一个响应，而 res[1] 中会放置第二个响应。
+
+```JavaScript
+// request(..)是一个支持Promise的Ajax工具
+var res = [];
+function *reqData(url) {
+ var data = yield request( url );
+ // 控制转移
+ yield;
+ res.push( data );
+}
+var it1 = reqData( "http://some.url.1" );
+var it2 = reqData( "http://some.url.2" );
+var p1 = it.next();
+var p2 = it.next();
+p1.then( function(data){
+ it1.next( data );
+} );
+p2.then( function(data){
+ it2.next( data );
+} );
+Promise.all( [p1,p2] )
+.then( function(){
+ it1.next();
+ it2.next();
+} ); 
+```
+
+可能不那么明显的是，因为对称性，这种方法以更简单的形式暗示了一种可重用的工具。还可以做得更好。来设想一下使用一个称为 runAll(..) 的工具：
+
+```JavaScript
+// request(..)是一个支持Promise的Ajax工具
+var res = [];
+runAll(
+   function*(){
+   var p1 = request( "http://some.url.1" );
+   // 控制转移
+   yield;
+   res.push( yield p1 );
+ },
+ function*(){
+   var p2 = request( "http://some.url.2" );
+   // 控制转移
+   yield;
+   res.push( yield p2 );
+ }
+); 
+```
+
+但是，如果继续扩展 runAll(..) 来提供一个内层的变量空间，以使多个生成器实例可以共享，将是非常有帮助的，比如下面这个称为 data 的空对象。还有，它可以接受 yield 的非Promise 值，并把它们传递到下一个生成器。
+
+```JavaScript
+// request(..)是一个支持Promise的Ajax工具
+runAll(
+ function*(data){
+   data.res = [];
+   // 控制转移（以及消息传递）
+   var url1 = yield "http://some.url.2";
+   var p1 = request( url1 ); // "http://some.url.1"
+   // 控制转移
+   yield;
+   data.res.push( yield p1 );
+ },
+ function*(data){
+   // 控制转移（以及消息传递）
+   var url2 = yield "http://some.url.1";
+   var p2 = request( url2 ); // "http://some.url.2"
+   // 控制转移
+   yield;
+   data.res.push( yield p2 );
+ }
+); 
+```
+
+### 4.7: 形实转换程序
+
+在通用计算机科学领域，有一个早期的前 JavaScript 概念，称为形实转换程序（thunk）。我们这里将不再陷入历史考据的泥沼，而是直接给出形实转换程序的一个狭义表述：JavaScript 中的 thunk 是指一个用于调用另外一个函数的函数，没有任何参数。
+换句话说，你用一个函数定义封装函数调用，包括需要的任何参数，来定义这个调用的执行，那么这个封装函数就是一个形实转换程序。之后在执行这个 thunk 时，最终就是调用了原始的函数。
+
+```JavaScript
+function foo(x,y) {
+ return x + y;
+}
+function fooThunk() {
+ return foo( 3, 4 );
+}
+// 将来
+console.log( fooThunk() ); // 7 
+// 所以，同步的 thunk 是非常简单的。但如果是异步的 thunk 呢？我们可以把这个狭窄的thunk 定义扩展到包含让它接收一个回调。
+function foo(x,y,cb) {
+ setTimeout( function(){
+ cb( x + y );
+ }, 1000 );
+}
+function fooThunk(cb) {
+ foo( 3, 4, cb );
+}
+// 将来
+fooThunk( function(sum){
+ console.log( sum ); // 7
+} ); 
+// 但是，你并不会想手工编写 thunk。所以，我们发明一个工具来做这部分封装工作。
+function thunkify(fn) {
+ var args = [].slice.call( arguments, 1 );
+ return function(cb) {
+ args.push( cb );
+ return fn.apply( null, args );
+ };
+}
+var fooThunk = thunkify( foo, 3, 4 );
+// 将来
+fooThunk( function(sum) {
+ console.log( sum ); // 7
+} ); 
+```
+
+暴露 thunkory 方法——而不是像前面的 thunkify(..) 那样把这个中间步骤隐藏——似乎是不必要的复杂性。但是，一般来说，在程序开头构造 thunkory 来封装已有的 API 方法，并在需要 thunk 时可以传递和调用这些 thunkory，是很有用的。两个独立的步骤保留了一个更清晰的功能分离。
+
+```JavaScript
+// 更简洁：
+var fooThunkory = thunkify( foo );
+var fooThunk1 = fooThunkory( 3, 4 );
+var fooThunk2 = fooThunkory( 5, 6 );
+// 而不是：
+var fooThunk1 = thunkify( foo, 3, 4 );
+var fooThunk2 = thunkify( foo, 5, 6 ); 
+
+```
+
+为了说明这种对称性，我们要首先把前面的 foo(..) 例子修改一下，改成使用 error-first 风格的回调：
+
+```JavaScript
+function foo(x,y,cb) {
+ setTimeout( function(){
+ // 假定cb(..)是error-first风格的
+ cb( null, x + y );
+ }, 1000 );
+} 
+// 现在我们对比一下 thunkify(..) 和 promisify(..)（即第 3 章中的 Promise.wrap(..)）的使用：
+// 对称：构造问题提问者
+var fooThunkory = thunkify( foo );
+var fooPromisory = promisify( foo );
+// 对称：提问
+var fooThunk = fooThunkory( 3, 4 );
+var fooPromise = fooPromisory( 3, 4 );
+// 得到答案
+fooThunk( function(err,sum){
+ if (err) {
+ console.error( err );
+ }
+ else {
+ console.log( sum ); // 7 
+ }
+} );
+// 得到promise答案
+fooPromise
+.then(
+ function(sum){
+ console.log( sum ); // 7
+ },
+ function(err){
+ console.error( err );
+ }
+); 
+```
+
+### 4.8: ES6 之前的生成器
+
+#### 4.8.1: 手工变换
+
+```JavaScript
+// request(..)是一个支持Promise的Ajax工具
+function *foo(url) {
+ try {
+ console.log( "requesting:", url );
+ var val = yield request( url );
+ console.log( val );
+ }
+ catch (err) {
+ console.log( "Oops:", err );
+ return false;
+ }
+}
+var it = foo( "http://some.url.1" ); 
+// 首先要观察到的是，我们仍然需要一个可以调用的普通函数 foo()，它仍然需要返回一个迭代器。因此，先把非生成器变换的轮廓刻画出来：
+function foo(url) {
+ // ..
+ // 构造并返回一个迭代器
+ return {
+ next: function(v) {
+ // ..
+ },
+ throw: function(e) {
+ // ..
+ }
+ };
+}
+var it = foo( "http://some.url.1" ); 
+```
+
+现在需要定义迭代器函数的代码，使这些函数正确调用 process(..)：
+
+```JavaScript
+function foo(url) {
+ // 管理生成器状态
+ var state;
+ // 生成器变量范围声明
+ var val;
+function process(v) {
+ switch (state) {
+ case 1:
+ console.log( "requesting:", url );
+ return request( url );
+ case 2:
+ val = v;
+ console.log( val ); 
+ return;
+ case 3:
+ var err = v;
+ console.log( "Oops:", err );
+ return false;
+ }
+}
+// 构造并返回一个生成器
+return {
+ next: function(v) {
+ // 初始状态
+ if (!state) {
+ state = 1;
+ return {
+ done: false,
+ value: process()
+ };
+ }
+ // yield成功恢复
+ else if (state == 1) {
+ state = 2;
+ return {
+ done: true,
+ value: process( v )
+ };
+ }
+ // 生成器已经完成
+ else {
+ return {
+ done: true,
+ value: undefined
+ };
+ }
+ },
+ "throw": function(e) {
+ // 唯一的显式错误处理在状态1
+ if (state == 1) {
+ state = 3;
+ return {
+ done: true,
+ value: process( e )
+ };
+ }
+ // 否则错误就不会处理，所以只把它抛回
+ else {
+ throw e;
+ }
+ }
+ };
+}
+```
+
+#### 4.8.2: 自动转换
+
+前面的 ES6 生成器到前 ES6 等价代码的手工推导练习，向我们教授了概念上生成器是如何工作的。但是，这个变换非常复杂，并且对于代码中的其他生成器而言也是不可移植的。这部分工作通过手工实现十分不实际，会完全抵消生成器的一切优势。
+
+如果使用 regenerator 来转换前面的生成器的话，以下是产生的代码（本书写作之时）：
+
+```JavaScript
+// request(..)是一个支持Promise的Ajax工具
+var foo = regeneratorRuntime.mark(function foo(url) {
+ var val;
+ return regeneratorRuntime.wrap(function foo$(context$1$0) {
+   while (1) switch (context$1$0.prev = context$1$0.next) {
+     case 0:
+     context$1$0.prev = 0;
+     console.log( "requesting:", url ); 
+     context$1$0.next = 4;
+     return request( url );
+     case 4:
+     val = context$1$0.sent;
+     console.log( val );
+     context$1$0.next = 12;
+     break;
+     case 8:
+     context$1$0.prev = 8;
+     context$1$0.t0 = context$1$0.catch(0);
+     console.log("Oops:", context$1$0.t0);
+     return context$1$0.abrupt("return", false);
+     case 12:
+     case "end":
+     return context$1$0.stop();
+ 	}
+ }, foo, this, [[0, 8]]);
+}); 
+```
+
+### 4.9: 小结
+
+1.生成器是 ES6 的一个新的函数类型，它并不像普通函数那样总是运行到结束。取而代之的是，生成器可以在运行当中（完全保持其状态）暂停，并且将来再从暂停的地方恢复运行。
+2.这种交替的暂停和恢复是合作性的而不是抢占式的，这意味着生成器具有独一无二的能力来暂停自身，这是通过关键字 yield 实现的。不过，只有控制生成器的迭代器具有恢复生成器的能力（通过 next(..)）。yield/next(..) 这一对不只是一种控制机制，实际上也是一种双向消息传递机制。yield .. 表达式本质上是暂停下来等待某个值，接下来的 next(..) 调用会向被暂停的 yield 表达式传回一个值（或者是隐式的 undefined）。
+3.在异步控制流程方面，生成器的关键优点是：生成器内部的代码是以自然的同步 / 顺序方式表达任务的一系列步骤。其技巧在于，我们把可能的异步隐藏在了关键字 yield 的后面，把异步移动到控制生成器的迭代器的代码部分。
+4.换句话说，生成器为异步代码保持了顺序、同步、阻塞的代码模式，这使得大脑可以更自然地追踪代码，解决了基于回调的异步的两个关键缺陷之一。
+
+## 第5章: 程序性能
+
+### 5.1: Web Worker
+
+如果你有一些处理密集型的任务要执行，但不希望它们都在主线程运行（这可能会减慢浏览器 /UI），可能你就会希望 JavaScript 能够以多线程的方式运行。
+
+```JavaScript
+// 以下是如何侦听事件（其实就是固定的 "message" 事件）：
+w1.addEventListener( "message", function(evt){
+ // evt.data
+} );
+// 也可以发送 "message" 事件给这个 Worker：
+w1.postMessage( "something cool to say" );
+// 在这个 Worker 内部，收发消息是完全对称的：
+// "mycoolworker.js"
+addEventListener( "message", function(evt){
+ // evt.data
+} );
+postMessage( "a really cool reply" ); 
+```
+
+#### 5.1.1: Worker 环境
+
+在 Worker 内部是无法访问主程序的任何资源的。这意味着你不能访问它的任何全局变量，也不能访问页面的 DOM 或者其他资源。记住，这是一个完全独立的线程。
+但是，你可以执行网络操作（Ajax、WebSockets）以及设定定时器。还有，Worker 可以访问几个重要的全局变量和功能的本地复本，包括 navigator、location、JSON 和applicationCache。
+
+**Web Worker 通常应用于哪些方面呢？**
+
+• 处理密集型数学计算
+• 大数据集排序
+• 数据处理（压缩、音频分析、图像处理等）
+• 高流量网络通信
+
+#### 5.1.2: 数据传递
+
+你可能已经注意到这些应用中的大多数有一个共性，就是需要在线程之间通过事件机制传递大量的信息，可能是双向的。
+
+#### 5.1.3: 共享 Worker
+
+```javascript
+// 在这种情况下，创建一个整个站点或 app 的所有页面实例都可以共享的中心 Worker 就非常有用了。
+// 这称为 SharedWorker，可通过下面的方式创建（只有 Firefox 和 Chrome 支持这一功能）：var w1 = new SharedWorker( "http://some.url.1/mycoolworker.js" );因为共享 Worker 可以与站点的多个程序实例或多个页面连接，所以这个 Worker 需要通过某种方式来得知消息来自于哪个程序。这个唯一标识符称为端口（port），可以类比网络socket 的端口。因此，调用程序必须使用 Worker 的 port 对象用于通信：
+w1.port.addEventListener( "message", handleMessages );
+// ..
+w1.port.postMessage( "something cool" );
+// 还有，端口连接必须要初始化，形式如下：
+w1.port.start();
+// 在共享 Worker 内部，必须要处理额外的一个事件："connect"。这个事件为这个特定的连接提供了端口对象。保持多个连接独立的最简单办法就是使用 port 上的闭包（参见本系列《你不知道的 JavaScript（上卷）》的“作用域和闭包”部分），就像下面的代码一样，把这个链接上的事件侦听和传递定义在 "connect" 事件的处理函数内部：
+// 在共享Worker内部
+addEventListener( "connect", function(evt){
+ // 这个连接分配的端口
+ var port = evt.ports[0];
+ port.addEventListener( "message", function(evt){
+ // ..
+ port.postMessage( .. );
+ // ..
+ } );
+ // 初始化端口连接
+ port.start();
+} ); 
+除了这个区别之外，共享和专用 Worker 在功能和语义方面都是一样的
+```
+
+> 如果有某个端口连接终止而其他端口连接仍然活跃，那么共享 Worker 不会终止。而对专用 Worker 来说，只要到实例化它的程序的连接终止，它就会终止。
+
+#### 5.1.4: 模拟 Web Worker
+
+编 写 了 一 个 模 拟 Worker 的 概 要 实 现（https://gist.github.com/getify/1b26accb1a09aa53ad25）。它是很基本的，但如果双向消息机制正确工作，并且“onerror”处理函数也正确工作，那么它应该可以提供简单的 Worker 支持。如果需要的话，你也可以扩展它，实现更多的功能，比如 terminate() 或伪共享 Worker。
+
+### 5.2: SIMD
+
+单指令多数据（SIMD）是一种数据并行（data parallelism）方式，与 Web Worker 的任务并行（task parallelism）相对，因为这里的重点实际上不再是把程序逻辑分成并行的块，而是并行处理数据的多个位。
+
+### 5.3: asm.js
+
+asm.js（http://asmjs.org）这个标签是指 JavaScript 语言中可以高度优化的一个子集。通过小心避免某些难以优化的机制和模式（垃圾收集、类型强制转换，等等），asm.js 风格的代码可以被 JavaScript 引擎识别并进行特别激进的底层优化。
+
+#### 5.3.1: 如何使用 asm.js 优化
+
+关于 asm.js 优化，首先要理解的是类型和强制类型转换（参见本书的“类型和语法”部分）。如果 JavaScript 引擎需要跟踪一个变量在各种各样的运算之间的多个不同类型的值，才能按需处理类型之间的强制类型转换，那么这大量的额外工作会使得程序优化无法达到最优。
+
+#### 5.3.2: asm.js 模块
+
+对 JavaScript 性能影响最大的因素是内存分配、垃圾收集和作用域访问。asm.js 对这些问题提出的一个解决方案就是，声明一个更正式的 asm.js“模块”，不要和 ES6 模块混淆。请参考本系列《你不知道的 JavaScript（下卷）》的“ES6 & Beyond”部分。
+
+### 5.4: 小结
+
+本部分的前四章都是基于这样一个前提：异步编码模式使我们能够编写更高效的代码，通常能够带来非常大的改进。但是，异步特性只能让你走这么远，因为它本质上还是绑定在一个单事件循环线程上。
+
+## 第6章: 性能与调试
+
+### 6.1: 性能测试
+
+#### 6.1.1: 重复
+
+要确保把异常因素排除，你需要大量的样本来平均化。你还会想要知道最差样本有多慢，最好的样本有多快，以及最好和最差情况之间的偏离度有多大，等等。你需要知道的不仅仅是一个告诉你某个东西跑得有多快的数字，还需要得到某个可以计量的测量值告诉你这个数字的可信度有多高。
+
+#### 6.1.2: Benchmark.js
+
+关于 Benchmark.js 的使用还有很多要学的。但是，关键在它处理了为给定的一段 JavaScript 代码建立公平、可靠、有效的性能测试的所有复杂性。如果你想要对你的代码进行功能测试和性能测试，这个库应该最优先考虑。
+
+### 6.2: 环境为王
+
+对特定的性能测试来说，不要忘了检查测试环境，特别是比较任务 X 和 Y 这样的比对测试。仅仅因为你的测试显示 X 比 Y 快，并不能说明结论 X 比 Y 快就有实际的意义。
+
+**引擎优化**
+
+你无法可靠地推断，如果在你的独立测试中 X 比 Y 要快上 10μs，就意味着 X 总是比 Y 要快，就应该总是使用 X。性能并不是这样发挥效力的。它要比这复杂得多。
+
+### 6.3: jsPerf.com
+
+尽管在所有的 JavaScript 运行环境下，Benchmark.js 都可用于测试代码的性能，但有一点一定要强调，如果你想要得到可靠的测试结论的话，就需要在很多不同的环境（桌面浏览器、移动设备，等等）中测试汇集测试结果。
+
+**完整性检查**
+
+jsPerf 是一个很好的资源，但认真分析的话，出于本章之前列出的多种原因，公开发布的测试中有大量是有缺陷或无意义的。
+
+### 6.4: 写好测试
+
+要写好测试，需要认真分析和思考两个测试用例之间有什么区别，以及这些区别是有意还是无意的。
+
+### 6.5: 微性能
+
+在考虑对代码进行性能测试时，你应该习惯的第一件事情就是你所写的代码并不总是引擎真正运行的代码。在第 1 章讨论编译器语句重排序问题时，我们简单介绍过这个问题。不过这里要说的是，有时候编译器可能会决定执行与你所写的不同的代码，不只是顺序不同，实际内容也会不同。
+
+#### 6.5.1: 不是所有的引擎都类似
+
+各种浏览器中的不同 JavaScript 引擎可以都是“符合规范的”，但其处理代码的方法却完全不同。JavaScript 规范并没有任何性能相关的要求，好吧，除了 ES6 的“尾调用优化”，这部分将在 6.6 节介绍。
+
+引擎可以自由决定一个运算是否需要优化，可能进行权衡，替换掉运算次要性能。对一个运算来说，很难找到一种方法使其在所有浏览器中都运行得较快。
+
+#### 6.5.2: 大局
+
+我相信这么解释高德纳的意思是合理的：“非关键路径上的优化是万恶之源。”所以，关键是确定你的代码是否在关键路径上——如果在的话，就应该优化！
+
+### 6.6: 尾调用优化
+
+简单地说，尾调用就是一个出现在另一个函数“结尾”处的函数调用。这个调用结束后就没有其余事情要做了（除了可能要返回结果值）。
+
+```javascript
+// 举例来说，以下是一个非递归的尾调用：
+function foo(x) {
+ return x;
+}
+function bar(y) {
+ return foo( y + 1 ); // 尾调用
+}
+function baz() {
+ return 1 + bar( 40 ); // 非尾调用
+}
+baz(); // 42 
+// 考虑到前面递归的 factorial(..)，这次重写成 TCO 友好的：
+function factorial(n) {
+ function fact(n,res) {
+ if (n < 2) return res;
+ return fact( n - 1, n * res );
+ }
+ return fact( n, 1 );
+}
+factorial( 5 ); // 120 
+```
+
+### 6.7: 小结
+
+遗憾的是，很多常用的性能测试执迷于无关紧要的微观性能细节，比如 x++ 对比 ++x。编写好的测试意味着理解如何关注大局，比如关键路径上的优化以及避免落入类似不同的JavaScript 实现细节这样的陷阱中。
